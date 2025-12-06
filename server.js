@@ -245,6 +245,48 @@ async function setDestination(destinationNumber, requestId, retryCount = 0) {
   return { success: true, message };
 }
 
+/**
+ * Get the current configuration for the TTNC number
+ */
+async function getNumberConfig(requestId) {
+  const sessionId = await getSessionId(requestId);
+
+  const getConfigXml = `<?xml version="1.0"?>
+<NoveroRequest>
+    <SessionId>${escapeXml(sessionId)}</SessionId>
+    <Request target="NoveroNumbers" name="GetNumberConfig" id="GetConfigRequest">
+        <Number>${escapeXml(CONFIG.ttnc.number)}</Number>
+    </Request>
+</NoveroRequest>`;
+
+  const response = await makeTTNCRequest(getConfigXml);
+  const parsed = await parseStringPromise(response);
+
+  const code = parsed?.NoveroResponse?.Response?.[0]?.$.Code;
+  
+  if (code !== '200') {
+    const message = parsed?.NoveroResponse?.Response?.[0]?.ResponseMessage?.[0] || 'Failed to get config';
+    throw new Error(message);
+  }
+
+  // Extract destination from the first rule
+  const rules = parsed?.NoveroResponse?.Response?.[0]?.Rules?.[0]?.Rule;
+  
+  if (!rules || rules.length === 0) {
+    return { destination: null, rules: [] };
+  }
+
+  // Get destination from the first rule (main routing)
+  const firstRule = rules[0];
+  const destination = firstRule?.Destination?.[0] || null;
+
+  return {
+    number: CONFIG.ttnc.number,
+    destination: destination,
+    destinationNumbers: destination ? destination.split('|') : []
+  };
+}
+
 // XML escape to prevent injection
 function escapeXml(str) {
   if (typeof str !== 'string') return '';
@@ -263,20 +305,29 @@ function validateDestination(destination) {
     return { valid: false, error: 'Destination number is required' };
   }
 
-  // Remove all whitespace and common separators
-  const cleaned = destination.replace(/[\s\-\(\)\.]/g, '');
-  
-  // Must be digits only, 10-15 characters (international format)
-  if (!/^\d{10,15}$/.test(cleaned)) {
-    return { 
-      valid: false, 
-      error: 'Invalid destination format. Use country code + number without leading 00 or + (e.g., 447500336778)' 
-    };
-  }
+  // Remove whitespace around pipes and within numbers
+  const cleaned = destination
+    .split('|')
+    .map(num => num.replace(/[\s\-\(\)\.]/g, '').trim())
+    .filter(num => num.length > 0)
+    .join('|');
 
-  // Block premium rate numbers (UK 09xx)
-  if (/^449/.test(cleaned)) {
-    return { valid: false, error: 'Premium rate numbers are not allowed' };
+  // Split into individual numbers for validation
+  const numbers = cleaned.split('|');
+
+  for (const num of numbers) {
+    // Must be digits only, 10-15 characters (international format)
+    if (!/^\d{10,15}$/.test(num)) {
+      return { 
+        valid: false, 
+        error: `Invalid destination format: ${num}. Use country code + number without leading 00 or + (e.g., 447500336778)` 
+      };
+    }
+
+    // Block premium rate numbers (UK 09xx)
+    if (/^449/.test(num)) {
+      return { valid: false, error: 'Premium rate numbers are not allowed' };
+    }
   }
 
   return { valid: true, cleaned };
@@ -324,6 +375,36 @@ app.post('/set-destination', authenticateApiKey, async (req, res) => {
       durationMs: Date.now() - startTime
     });
     res.status(500).json({ error: 'Failed to set destination. Please try again.' });
+  }
+});
+
+/**
+ * GET /get-destination
+ * Headers: X-API-Key: your-api-key
+ * Returns current destination number(s)
+ */
+app.get('/get-destination', authenticateApiKey, async (req, res) => {
+  const startTime = Date.now();
+  
+  try {
+    log('info', 'Getting current destination', { requestId: req.requestId });
+
+    const result = await getNumberConfig(req.requestId);
+    
+    log('info', 'Got destination successfully', { 
+      requestId: req.requestId,
+      durationMs: Date.now() - startTime
+    });
+    
+    res.json(result);
+
+  } catch (error) {
+    log('error', 'Failed to get destination', { 
+      requestId: req.requestId,
+      error: error.message,
+      durationMs: Date.now() - startTime
+    });
+    res.status(500).json({ error: 'Failed to get destination. Please try again.' });
   }
 });
 
