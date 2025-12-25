@@ -242,7 +242,39 @@ async function setDestination(destinationNumber, requestId, retryCount = 0) {
     throw new Error(message);
   }
 
-  return { success: true, message };
+  // Automatically enable route to all (ring all destinations simultaneously)
+  await enableRouteToAllInternal(requestId);
+
+  return { success: true, message: 'Destination set successfully (ringing all at once)' };
+}
+
+/**
+ * Enable Route to All - Ring all destinations simultaneously (internal)
+ */
+async function enableRouteToAllInternal(requestId) {
+  const sessionId = await getSessionId(requestId);
+
+  const enableXml = `<?xml version="1.0"?>
+<NoveroRequest>
+    <SessionId>${escapeXml(sessionId)}</SessionId>
+    <Request target="NoveroNumbers" name="EnableRouteToAll" id="EnableRouteToAllRequest">
+        <Number>${escapeXml(CONFIG.ttnc.number)}</Number>
+    </Request>
+</NoveroRequest>`;
+
+  const response = await makeTTNCRequest(enableXml);
+  const parsed = await parseStringPromise(response);
+
+  const code = parsed?.NoveroResponse?.Response?.[0]?.$.Code;
+  const message = parsed?.NoveroResponse?.Response?.[0]?.ResponseMessage?.[0] || 
+                  parsed?.NoveroResponse?.Response?.[0]?.Success?.[0] || 
+                  'Unknown response';
+
+  if (code !== '200') {
+    throw new Error(message);
+  }
+
+  return { success: true, message: 'Route to all enabled - calls will ring all destinations at once' };
 }
 
 /**
@@ -405,6 +437,36 @@ app.get('/get-destination', authenticateApiKey, async (req, res) => {
       durationMs: Date.now() - startTime
     });
     res.status(500).json({ error: 'Failed to get destination. Please try again.' });
+  }
+});
+
+/**
+ * POST /enable-route-to-all
+ * Headers: X-API-Key: your-api-key
+ * Enables ringing all destinations simultaneously
+ */
+app.post('/enable-route-to-all', authenticateApiKey, async (req, res) => {
+  const startTime = Date.now();
+  
+  try {
+    log('info', 'Enabling route to all', { requestId: req.requestId });
+
+    const result = await enableRouteToAllInternal(req.requestId);
+    
+    log('info', 'Route to all enabled', { 
+      requestId: req.requestId,
+      durationMs: Date.now() - startTime
+    });
+    
+    res.json(result);
+
+  } catch (error) {
+    log('error', 'Failed to enable route to all', { 
+      requestId: req.requestId,
+      error: error.message,
+      durationMs: Date.now() - startTime
+    });
+    res.status(500).json({ error: 'Failed to enable route to all. Please try again.' });
   }
 });
 
